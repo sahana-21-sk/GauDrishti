@@ -109,11 +109,17 @@ def build_results(tracks, fps, W, H, cfg=None, video_name="", processed_video="p
     def in_feed(v):
         if not fz:
             return False
-        x, y = v["cx"] / W, v["cy"] / H
-        return fz[0] <= x <= fz[2] and fz[1] <= y <= fz[3]
+
+        # Use the bottom of the cow's bounding box rather than its center.
+        # This better captures grazing/feeding when the cow lowers its head.
+        x1, y1, x2, y2 = v["box"]
+        x = ((x1 + x2) / 2) / W
+        bottom_y = y2 / H
+
+        return fz[0] <= x <= fz[2] and fz[1] <= bottom_y <= fz[3]
 
     mounts, iso = detect_mounts(ps, c), _isolation(ps, W, H)
-    cows, alerts = [], []
+    cows, watchlist, alerts = [], [], []
     for i in sorted(ps):
         d = ps[i]
         href = float(np.percentile([v["h"] for v in d.values()], 90))
@@ -151,6 +157,27 @@ def build_results(tracks, fps, W, H, cfg=None, video_name="", processed_video="p
             if feed < -0.2: r.append(f"Feeding time down {int(-feed * 100)}% vs her baseline")
             alerts.append(dict(cow_id=i, type="heat", score=round(heat, 2),
                                t=float(my[0]["t_start"] if my else split), reasons=r))
+        # Watch case: meaningful behavioural deviation below the formal alert threshold.
+        if 0.30 <= health < c["health_alert"]:
+            r = []
+            if act < -0.10:
+                r.append(f"Movement {int(-act * 100)}% lower than her baseline")
+            if lying > 0.10:
+                r.append(f"Lying time up {int(lying * 100)} percentage points")
+            if feed < -0.20:
+                r.append(f"Feeding time down {int(-feed * 100)}% vs her baseline")
+            if iso[i] > 0.20:
+                r.append(f"Away from the herd {int(iso[i] * 100)}% of the time")
+
+            # Only create a Watch case when there is an actual reason.
+            if r:
+                watchlist.append(dict(
+                    cow_id=i,
+                    score=round(health, 2),
+                    t=float(split),
+                    reasons=r
+                ))
+
         if health >= c["health_alert"]:
             r = []
             if act < -0.2: r.append(f"Movement {int(-act * 100)}% lower than her baseline")
@@ -158,6 +185,13 @@ def build_results(tracks, fps, W, H, cfg=None, video_name="", processed_video="p
             if feed < -0.2: r.append(f"Feeding time down {int(-feed * 100)}% vs her baseline")
             if iso[i] > 0.2: r.append(f"Away from the herd {int(iso[i] * 100)}% of the time")
             alerts.append(dict(cow_id=i, type="health", score=round(health, 2), t=float(split), reasons=r))
+    watchlist.sort(key=lambda a: -a["score"])
+    for n, w in enumerate(watchlist, 1):
+        w["id"] = f"W{n}"
+        w["clip"] = f"clips/watch_cow{w['cow_id']}_{int(w['t'])}.mp4"
+        w["clip_start"] = max(0.0, w["t"] - c["clip_pre"])
+        w["clip_dur"] = float(c["clip_pre"] + c["clip_post"])
+
     alerts.sort(key=lambda a: -a["score"])
     for n, a in enumerate(alerts, 1):
         a["id"] = f"A{n}"
@@ -166,4 +200,4 @@ def build_results(tracks, fps, W, H, cfg=None, video_name="", processed_video="p
         a["clip_dur"] = float(c["clip_pre"] + c["clip_post"])
     meta = dict(schema_version=1, video_name=video_name, fps=fps, duration_s=T, width=W, height=H,
                 baseline_until_s=split, video_start_clock=c["video_start_clock"], processed_video=processed_video)
-    return dict(meta=meta, cows=cows, events=mounts, alerts=alerts)
+    return dict(meta=meta, cows=cows, events=mounts, watchlist=watchlist, alerts=alerts)

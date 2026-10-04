@@ -20,7 +20,7 @@ def run_ffmpeg(args):
         return False
 
 
-def run_tracking(video, model_name="yolov8n.pt", conf=0.3, imgsz=960):
+def run_tracking(video, model_name="yolov8n.pt", conf=0.1, imgsz=640):
     from ultralytics import YOLO  # lazy import: tests / sample data don't need it
     cap = cv2.VideoCapture(str(video))
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -28,7 +28,7 @@ def run_tracking(video, model_name="yolov8n.pt", conf=0.3, imgsz=960):
     cap.release()
     tracks = {}
     stream = YOLO(model_name).track(source=str(video), stream=True, persist=True, tracker="bytetrack.yaml",
-                                    classes=[19], conf=conf, imgsz=imgsz, verbose=False)  # 19 = cow (COCO)
+                                    classes=[19], conf=conf, iou=0.1, imgsz=imgsz, verbose=False)  # 19 = cow (COCO)
     for fi, r in enumerate(stream):
         rows = []
         if r.boxes is not None and r.boxes.id is not None:
@@ -42,6 +42,11 @@ def render_video(src_video, tracks, results, out_path, fps, W, H):
     alert_t = {}
     for a in results["alerts"]:
         alert_t[a["cow_id"]] = min(a["t"], alert_t.get(a["cow_id"], 1e9))
+
+    watch_t = {}
+    for w in results.get("watchlist", []):
+        watch_t[w["cow_id"]] = min(w["t"], watch_t.get(w["cow_id"], 1e9))
+
     raw = str(Path(out_path).with_suffix(".raw.mp4"))
     wr = cv2.VideoWriter(raw, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
     cap = cv2.VideoCapture(str(src_video)) if src_video else None
@@ -57,10 +62,38 @@ def render_video(src_video, tracks, results, out_path, fps, W, H):
             if (i, sec) not in state:
                 continue
             hot = i in alert_t and sec >= alert_t[i]
-            col = (0, 0, 255) if hot else COLORS[state[(i, sec)]]
-            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), col, 3 if hot else 2)
-            cv2.putText(frame, f"Cow #{i} {state[(i, sec)]}" + (" !" if hot else ""),
-                        (int(x1), max(15, int(y1) - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2)
+            watch = i in watch_t and sec >= watch_t[i]
+
+            if hot:
+                col = (0, 0, 255)          # Red = formal alert
+                label = f"Cow #{i} {state[(i, sec)]} !"
+                thickness = 3
+            elif watch:
+                col = (0, 215, 255)        # Yellow = watch
+                label = f"Cow #{i} {state[(i, sec)]} WATCH"
+                thickness = 3
+            else:
+                col = COLORS[state[(i, sec)]]
+                label = f"Cow #{i} {state[(i, sec)]}"
+                thickness = 2
+
+            cv2.rectangle(
+                frame,
+                (int(x1), int(y1)),
+                (int(x2), int(y2)),
+                col,
+                thickness
+            )
+
+            cv2.putText(
+                frame,
+                label,
+                (int(x1), max(15, int(y1) - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                col,
+                2
+            )
         wr.write(frame)
     wr.release()
     if cap is not None:
@@ -73,12 +106,21 @@ def render_video(src_video, tracks, results, out_path, fps, W, H):
 
 
 def make_clips(processed, results, out_dir):
+    # Formal alerts
     for a in results["alerts"]:
         dst = Path(out_dir) / a["clip"]
         dst.parent.mkdir(parents=True, exist_ok=True)
         if not run_ffmpeg(["-ss", str(a["clip_start"]), "-i", str(processed), "-t", str(a["clip_dur"]),
                            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", str(dst)]):
             a["clip"] = None
+
+    # Watchlist evidence clips
+    for w in results.get("watchlist", []):
+        dst = Path(out_dir) / w["clip"]
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if not run_ffmpeg(["-ss", str(w["clip_start"]), "-i", str(processed), "-t", str(w["clip_dur"]),
+                           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", str(dst)]):
+            w["clip"] = None
 
 
 def process(video, out_dir, model="yolov8n.pt", conf=0.3, feed_zone=None, start_clock="06:00"):
@@ -101,7 +143,7 @@ if __name__ == "__main__":
     ap.add_argument("video")
     ap.add_argument("--out", default="output")
     ap.add_argument("--model", default="yolov8n.pt")
-    ap.add_argument("--conf", type=float, default=0.3)
+    ap.add_argument("--conf", type=float, default=0.1)
     ap.add_argument("--feed-zone", default=None, help="x1,y1,x2,y2 fractions, e.g. 0,0.75,1,1")
     ap.add_argument("--start-clock", default="06:00")
     a = ap.parse_args()
