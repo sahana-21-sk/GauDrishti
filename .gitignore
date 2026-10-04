@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+data/live/*
+!data/live/.gitkeep
+*.raw.mp4
