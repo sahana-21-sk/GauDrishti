@@ -116,26 +116,81 @@ def build_results(tracks, fps, W, H, cfg=None, video_name="", processed_video="p
         x = ((x1 + x2) / 2) / W
         bottom_y = y2 / H
 
-        return fz[0] <= x <= fz[2] and fz[1] <= bottom_y <= fz[3]
+        # Small tolerance prevents a cow near the feed-zone boundary
+        # from flipping between feeding and another posture because of
+        # minor bounding-box movement.
+        feed_margin = 0.01
+        return (
+            fz[0] <= x <= fz[2]
+            and (fz[1] - feed_margin) <= bottom_y <= fz[3]
+        )
 
     mounts, iso = detect_mounts(ps, c), _isolation(ps, W, H)
     cows, watchlist, alerts = [], [], []
     for i in sorted(ps):
         d = ps[i]
         href = float(np.percentile([v["h"] for v in d.values()], 90))
-        tl = []
+        # First classify each second using movement/feed-zone cues.
+        # Lying is handled separately below so that a brief bounding-box
+        # height drop cannot create a false lying label.
+        raw_tl = []
         for s in sorted(d):
             v = d[s]
+
             if v["speed"] >= c["walk_speed"]:
                 st = "walking"
             elif in_feed(v):
                 st = "feeding"
-            elif v["h"] < c["lying_height_ratio"] * href:
-                st = "lying"
             else:
                 st = "standing"
-            tl.append(dict(t=s, state=st, speed=round(v["speed"], 3),
-                           x=round(v["cx"] / W, 4), y=round(v["cy"] / H, 4)))
+
+            raw_tl.append(dict(
+                t=s,
+                state=st,
+                speed=round(v["speed"], 3),
+                x=round(v["cx"] / W, 4),
+                y=round(v["cy"] / H, 4)
+            ))
+
+        # Require a low-height posture to persist for at least 3 consecutive
+        # seconds before calling it lying.
+        lying_threshold = c["lying_height_ratio"] * href
+        seconds = sorted(d)
+        low_height = [
+            d[s]["h"] < lying_threshold
+            for s in seconds
+        ]
+
+        lying_ok = [False] * len(seconds)
+        run = 0
+
+        for k, is_low in enumerate(low_height):
+            if is_low:
+                run += 1
+            else:
+                run = 0
+
+            if run >= 3:
+                lying_ok[k] = True
+                lying_ok[k - 1] = True
+                lying_ok[k - 2] = True
+
+        tl = []
+        for k, item in enumerate(raw_tl):
+            st = item["state"]
+
+            # Only use lying when the low-height evidence persists.
+            # Feeding/walking still take priority.
+            if lying_ok[k] and st == "standing":
+                st = "lying"
+
+            tl.append(dict(
+                t=item["t"],
+                state=st,
+                speed=item["speed"],
+                x=item["x"],
+                y=item["y"]
+            ))
         base, rec = [p for p in tl if p["t"] < split], [p for p in tl if p["t"] >= split]
         if len(base) < 2 or len(rec) < 2:
             base = rec = tl
