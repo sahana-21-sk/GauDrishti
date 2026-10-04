@@ -5,3 +5,4 @@ __pycache__/
 data/live/*
 !data/live/.gitkeep
 *.raw.mp4
+.streamlit/secrets.toml
